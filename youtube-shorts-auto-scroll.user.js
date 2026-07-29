@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.0.0
+// @version      1.0.1
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -22,6 +22,18 @@
   let enabled = GM_getValue('enabled', true);
   let currentVideo = null;
   let lastAdvanceAt = 0;
+  let suppressUntil = 0;   // janela em que NÃO se avança (resize/fullscreen)
+  let lastTime = -1;       // último currentTime visto (continuidade de reprodução)
+
+  // Ao redimensionar a janela ou entrar/sair de fullscreen, o YouTube
+  // recarrega o vídeo noutra qualidade e o currentTime/duration ficam num
+  // estado transitório que parece "fim do vídeo" — suprimimos avanços
+  // durante uns instantes para não saltar Shorts sem querer.
+  function suppress() {
+    suppressUntil = Date.now() + 2000;
+  }
+  window.addEventListener('resize', suppress);
+  document.addEventListener('fullscreenchange', suppress);
 
   GM_registerMenuCommand('Ativar / Desativar auto-scroll', () => {
     enabled = !enabled;
@@ -38,6 +50,7 @@
   // no contentor dos reels.
   function nextShort() {
     const now = Date.now();
+    if (now < suppressUntil) return;        // resize/fullscreen recente
     if (now - lastAdvanceAt < 1500) return; // evita duplo avanço
     lastAdvanceAt = now;
 
@@ -59,11 +72,17 @@
   }
 
   // Com loop ativo o evento "ended" não dispara, por isso vigiamos também
-  // o timeupdate e avançamos mesmo antes do fim.
+  // o timeupdate e avançamos mesmo antes do fim. Só avançamos se o fim foi
+  // atingido por reprodução contínua (delta pequeno e positivo) — durante
+  // um resize/troca de qualidade o currentTime dá saltos e ignoramos.
   function onTimeUpdate(e) {
     if (!enabled || !isShortsPage()) return;
     const v = e.target;
-    if (v.duration && v.currentTime >= v.duration - 0.15) {
+    const t = v.currentTime;
+    const delta = t - lastTime;
+    lastTime = t;
+    if (!v.duration || v.duration < 1 || v.seeking) return;
+    if (t >= v.duration - 0.15 && delta > 0 && delta < 1) {
       nextShort();
     }
   }
@@ -73,7 +92,12 @@
 
     const video = document.querySelector('ytd-shorts video, #shorts-player video, video');
     if (!video || video === currentVideo) {
-      if (video) video.loop = false; // o YouTube volta a pôr loop=true
+      if (video) {
+        video.loop = false; // o YouTube volta a pôr loop=true
+        // Se o "ended" caiu dentro da janela de supressão (resize),
+        // o vídeo fica parado no fim — apanhamos aqui esse caso.
+        if (enabled && video.ended) nextShort();
+      }
       return;
     }
 
@@ -83,6 +107,7 @@
     }
 
     currentVideo = video;
+    lastTime = -1;
     video.loop = false;
     video.addEventListener('ended', onEnded);
     video.addEventListener('timeupdate', onTimeUpdate);

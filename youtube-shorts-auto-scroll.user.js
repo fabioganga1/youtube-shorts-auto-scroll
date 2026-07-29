@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.0.1
+// @version      1.0.2
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -95,8 +95,12 @@
       if (video) {
         video.loop = false; // o YouTube volta a pôr loop=true
         // Se o "ended" caiu dentro da janela de supressão (resize),
-        // o vídeo fica parado no fim — apanhamos aqui esse caso.
-        if (enabled && video.ended) nextShort();
+        // o vídeo fica parado no fim — e após a troca de qualidade a
+        // flag "ended" pode perder-se, por isso também consideramos
+        // "pausado mesmo no fim" como terminado.
+        const stuckAtEnd = video.paused && video.duration > 1 &&
+          video.currentTime >= video.duration - 0.2;
+        if (enabled && (video.ended || stuckAtEnd)) nextShort();
       }
       return;
     }

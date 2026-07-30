@@ -1,25 +1,24 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.0.2
+// @version      1.1.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_registerMenuCommand
+// @grant        none
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/fabioganga1/youtube-shorts-auto-scroll/main/youtube-shorts-auto-scroll.user.js
 // @downloadURL  https://raw.githubusercontent.com/fabioganga1/youtube-shorts-auto-scroll/main/youtube-shorts-auto-scroll.user.js
 // ==/UserScript==
 
+// Para desativar o auto-scroll, desliga o script no próprio Tampermonkey.
+
 (function () {
   'use strict';
 
-  let enabled = GM_getValue('enabled', true);
   let currentVideo = null;
   let lastAdvanceAt = 0;
   let suppressUntil = 0;   // janela em que NÃO se avança (resize/fullscreen)
@@ -34,12 +33,6 @@
   }
   window.addEventListener('resize', suppress);
   document.addEventListener('fullscreenchange', suppress);
-
-  GM_registerMenuCommand('Ativar / Desativar auto-scroll', () => {
-    enabled = !enabled;
-    GM_setValue('enabled', enabled);
-    showToast(enabled ? '▶ Auto-scroll ATIVADO' : '⏸ Auto-scroll DESATIVADO');
-  });
 
   function isShortsPage() {
     return location.pathname.startsWith('/shorts/');
@@ -68,7 +61,7 @@
   }
 
   function onEnded() {
-    if (enabled && isShortsPage()) nextShort();
+    if (isShortsPage()) nextShort();
   }
 
   // Com loop ativo o evento "ended" não dispara, por isso vigiamos também
@@ -76,7 +69,7 @@
   // atingido por reprodução contínua (delta pequeno e positivo) — durante
   // um resize/troca de qualidade o currentTime dá saltos e ignoramos.
   function onTimeUpdate(e) {
-    if (!enabled || !isShortsPage()) return;
+    if (!isShortsPage()) return;
     const v = e.target;
     const t = v.currentTime;
     const delta = t - lastTime;
@@ -100,7 +93,7 @@
         // "pausado mesmo no fim" como terminado.
         const stuckAtEnd = video.paused && video.duration > 1 &&
           video.currentTime >= video.duration - 0.2;
-        if (enabled && (video.ended || stuckAtEnd)) nextShort();
+        if (video.ended || stuckAtEnd) nextShort();
       }
       return;
     }
@@ -115,22 +108,6 @@
     video.loop = false;
     video.addEventListener('ended', onEnded);
     video.addEventListener('timeupdate', onTimeUpdate);
-  }
-
-  function showToast(text) {
-    const t = document.createElement('div');
-    t.textContent = text;
-    Object.assign(t.style, {
-      position: 'fixed', bottom: '24px', left: '50%',
-      transform: 'translateX(-50%)', zIndex: 999999,
-      background: 'rgba(0,0,0,.85)', color: '#fff',
-      padding: '10px 18px', borderRadius: '8px',
-      font: '14px/1.4 Roboto, Arial, sans-serif',
-      pointerEvents: 'none', transition: 'opacity .4s',
-    });
-    document.body.appendChild(t);
-    setTimeout(() => { t.style.opacity = '0'; }, 1800);
-    setTimeout(() => t.remove(), 2300);
   }
 
   // O YouTube é uma SPA: o vídeo troca sem recarregar a página,

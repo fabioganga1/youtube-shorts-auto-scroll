@@ -24,8 +24,8 @@ As atualizações chegam automaticamente via Tampermonkey (`@updateURL`).
 
 ## Ligar / desligar
 
-No menu do Tampermonkey (ícone da extensão) há a opção
-**"Ativar / Desativar auto-scroll"** — o estado fica guardado entre sessões.
+Para desativar o auto-scroll, desliga o próprio script no painel do
+Tampermonkey (interruptor do script) — não há botão dentro da página.
 
 ## Licença
 

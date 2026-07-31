@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.3.0
+// @version      1.4.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -34,7 +34,8 @@
 
   // Estado por Short (reposto quando o URL muda)
   let maxPlayed = 0;       // ponto mais avançado atingido em reprodução CONTÍNUA
-  let stableDuration = 0;  // duração observada durante reprodução contínua
+  let stableDuration = 0;  // duração TRANCADA após leituras consistentes
+  let durSamples = [];     // leituras de duração à espera de confirmação
 
   const lockedVideos = new WeakSet();
 
@@ -53,6 +54,7 @@
   function resetShortState() {
     maxPlayed = 0;
     stableDuration = 0;
+    durSamples = [];
     lastTime = -1;
     pendingAdvance = false;
   }
@@ -140,9 +142,20 @@
     lastTime = t;
     if (!isShortsPage() || v.seeking) return;
     if (delta <= 0 || delta >= 1) return; // salto: não é reprodução contínua
-    if (v.duration && isFinite(v.duration) && v.duration > 1) {
-      stableDuration = v.duration;
+
+    // A duração só é aceite após 3 leituras consecutivas concordantes em
+    // reprodução contínua, e depois fica TRANCADA para este Short. Durante
+    // reloads de qualidade o YouTube pode reportar durações transitórias
+    // (ex.: encolhida até à posição atual) que validariam um falso "fim".
+    if (!stableDuration && v.duration && isFinite(v.duration) && v.duration > 1) {
+      durSamples.push(v.duration);
+      if (durSamples.length > 3) durSamples.shift();
+      if (durSamples.length === 3 &&
+          Math.max(...durSamples) - Math.min(...durSamples) < 0.5) {
+        stableDuration = Math.max(...durSamples);
+      }
     }
+
     if (t > maxPlayed) maxPlayed = t;
     if (stableDuration && t >= stableDuration - 0.35 && watchedToEnd()) {
       nextShort();

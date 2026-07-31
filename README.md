@@ -2,6 +2,8 @@
 
 Userscript (Tampermonkey) que faz **scroll automático nos YouTube Shorts**: quando um
 Short termina, passa automaticamente para o seguinte — sem tocar em nada.
+(Apenas YouTube **desktop**; o site mobile usa outra interface sem os mecanismos
+de navegação necessários.)
 
 ## Instalação
 

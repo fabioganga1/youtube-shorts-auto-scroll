@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.2.0
+// @version      1.3.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -15,23 +15,31 @@
 // ==/UserScript==
 
 // Para desativar o auto-scroll, desliga o script no próprio Tampermonkey.
+//
+// Invariante central: SÓ se avança para o próximo Short se o utilizador
+// viu mesmo este até (perto d)o fim — medido por reprodução contínua
+// acumulada (maxPlayed). Resizes, fullscreen, trocas de qualidade e flags
+// sujas geram sinais falsos de "fim", mas nunca conseguem falsificar a
+// reprodução contínua, por isso nunca causam avanços indevidos.
 
 (function () {
   'use strict';
 
   let currentVideo = null;
   let lastAdvanceAt = 0;
-  let suppressUntil = 0;      // janela em que NÃO se avança (resize/fullscreen)
-  let pendingAdvance = false; // avanço adiado pela janela de supressão
-  let lastTime = -1;          // último currentTime visto (continuidade de reprodução)
+  let suppressUntil = 0;      // janela pós-resize/fullscreen: não avançar já
+  let pendingAdvance = false; // avanço genuíno adiado pela janela acima
+  let lastTime = -1;          // último currentTime visto (para medir deltas)
   let lastPath = location.pathname;
+
+  // Estado por Short (reposto quando o URL muda)
+  let maxPlayed = 0;       // ponto mais avançado atingido em reprodução CONTÍNUA
+  let stableDuration = 0;  // duração observada durante reprodução contínua
 
   const lockedVideos = new WeakSet();
 
-  // Ao redimensionar a janela ou entrar/sair de fullscreen, o YouTube
-  // recarrega o vídeo noutra qualidade e o currentTime/duration ficam num
-  // estado transitório que parece "fim do vídeo" — suprimimos avanços
-  // durante uns instantes para não saltar Shorts sem querer.
+  // Ao redimensionar/alternar fullscreen, o YouTube recarrega o vídeo
+  // noutra qualidade — não avançamos durante esses instantes.
   function suppress() {
     suppressUntil = Date.now() + 2000;
   }
@@ -40,6 +48,13 @@
 
   function isShortsPage() {
     return location.pathname.startsWith('/shorts/');
+  }
+
+  function resetShortState() {
+    maxPlayed = 0;
+    stableDuration = 0;
+    lastTime = -1;
+    pendingAdvance = false;
   }
 
   // O YouTube religa loop=true a toda a hora (seeks, trocas de qualidade),
@@ -63,14 +78,19 @@
     }
   }
 
-  // Avança para o próximo Short. Tenta o botão de navegação do próprio
-  // YouTube (desktop); se não existir (mobile / layout novo), faz scroll
-  // no contentor dos reels.
+  // Verdade fundamental: o utilizador viu este Short até (perto d)o fim?
+  // Só a reprodução contínua consegue satisfazer isto — nenhum sinal
+  // transitório de resize/reload o falsifica.
+  function watchedToEnd() {
+    return stableDuration > 0 && maxPlayed >= stableDuration - 1.5;
+  }
+
+  // Avança para o próximo Short (só chamado depois de watchedToEnd()).
   function nextShort() {
     const now = Date.now();
     if (now < suppressUntil) {
-      // fim do vídeo apanhou a janela pós-resize: fica pendente e o
-      // verificador periódico dispara-o assim que a janela expirar.
+      // fim genuíno em plena janela pós-resize: fica pendente e o
+      // verificador periódico dispara-o quando a janela expirar.
       pendingAdvance = true;
       return;
     }
@@ -107,36 +127,46 @@
   }
 
   function onEnded() {
-    if (isShortsPage()) nextShort();
+    if (isShortsPage() && watchedToEnd()) nextShort();
   }
 
-  // Rede de segurança: com o loop trancado o "ended" é o caminho normal,
-  // mas se um tick de timeupdate cair mesmo em cima do fim avançamos já.
-  // Só com reprodução contínua (delta pequeno e positivo) — durante um
-  // resize/troca de qualidade o currentTime dá saltos e ignoramos.
+  // Mede a reprodução contínua. Deltas anormais (seek, reload de
+  // qualidade, troca de vídeo) são ignorados — só o avanço natural do
+  // relógio de reprodução conta para maxPlayed/stableDuration.
   function onTimeUpdate(e) {
-    if (!isShortsPage()) return;
     const v = e.target;
     const t = v.currentTime;
     const delta = t - lastTime;
     lastTime = t;
-    if (!v.duration || v.duration < 1 || v.seeking) return;
-    if (t >= v.duration - 0.35 && delta > 0 && delta < 1) {
+    if (!isShortsPage() || v.seeking) return;
+    if (delta <= 0 || delta >= 1) return; // salto: não é reprodução contínua
+    if (v.duration && isFinite(v.duration) && v.duration > 1) {
+      stableDuration = v.duration;
+    }
+    if (t > maxPlayed) maxPlayed = t;
+    if (stableDuration && t >= stableDuration - 0.35 && watchedToEnd()) {
       nextShort();
     }
   }
 
+  // Rebobinar exige voltar a ver até ao fim (senão, um sinal falso após
+  // um rewind podia reaproveitar um maxPlayed antigo).
+  function onSeeked(e) {
+    maxPlayed = Math.min(maxPlayed, e.target.currentTime);
+  }
+
   function tick() {
     // Navegou para outro Short (manual ou automático): estado limpo.
+    // Isto também mata avanços em cadeia: a flag "ended" suja que fica
+    // no elemento reutilizado nunca passa em watchedToEnd() (maxPlayed=0).
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
-      pendingAdvance = false;
-      lastTime = -1;
+      resetShortState();
     }
 
     if (!isShortsPage()) return;
 
-    // Avanço que ficou pendente durante a janela pós-resize.
+    // Avanço genuíno que ficou pendente durante a janela pós-resize.
     if (pendingAdvance && Date.now() >= suppressUntil) {
       nextShort();
     }
@@ -149,24 +179,26 @@
     if (video.hasAttribute('loop')) video.removeAttribute('loop');
 
     if (video === currentVideo) {
-      // Se o "ended" se perdeu (recarregamento de qualidade em cima do
-      // fim), o vídeo fica parado no fim — apanhamos aqui esse caso.
-      const stuckAtEnd = video.paused && !video.seeking &&
-        video.readyState >= 2 && video.duration > 1 &&
-        video.currentTime >= video.duration - 0.2;
-      if (video.ended || stuckAtEnd) nextShort();
+      // Fim que o "ended" perdeu (reload de qualidade em cima do fim
+      // deixa o vídeo pausado no fim sem flag). stableDuration em vez da
+      // duration ao vivo: valores transitórios do reload não contam.
+      const stuck = video.paused && !video.seeking && video.readyState >= 2 &&
+        stableDuration > 0 && video.currentTime >= stableDuration - 0.3;
+      if ((video.ended || stuck) && watchedToEnd()) nextShort();
       return;
     }
 
     if (currentVideo) {
       currentVideo.removeEventListener('ended', onEnded);
       currentVideo.removeEventListener('timeupdate', onTimeUpdate);
+      currentVideo.removeEventListener('seeked', onSeeked);
     }
 
     currentVideo = video;
     lastTime = -1;
     video.addEventListener('ended', onEnded);
     video.addEventListener('timeupdate', onTimeUpdate);
+    video.addEventListener('seeked', onSeeked);
   }
 
   // O YouTube é uma SPA: o vídeo troca sem recarregar a página,

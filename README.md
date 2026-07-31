@@ -16,10 +16,15 @@ As atualizações chegam automaticamente via Tampermonkey (`@updateURL`).
 
 ## Como funciona
 
-- Desativa o *loop* do vídeo e escuta o evento `ended` (com um *fallback* via
-  `timeupdate` para o caso de o YouTube reativar o loop).
-- Quando o vídeo acaba, clica no botão nativo "vídeo seguinte" do YouTube;
-  se o botão não existir, faz scroll no contentor dos reels.
+- **Tranca o *loop* do vídeo** (o YouTube tenta religá-lo constantemente e,
+  com loop ativo, o vídeo dá a volta sem disparar `ended`) — assim o fim do
+  vídeo é sempre detetado.
+- **Invariante anti-falsos-positivos**: só avança se o vídeo foi mesmo visto
+  até perto do fim, medido por reprodução contínua acumulada. Resizes,
+  fullscreen e trocas de qualidade geram sinais falsos de "fim", mas nunca
+  conseguem falsificar a reprodução contínua.
+- Para avançar tenta, por ordem: botão nativo "vídeo seguinte" → método
+  interno do componente `ytd-shorts` → clique no botão escondido → scroll.
 - Funciona com a navegação SPA do YouTube (não é preciso recarregar a página).
 
 ## Ligar / desligar

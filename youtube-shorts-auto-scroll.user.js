@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.5.0
+// @version      1.6.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
+// @license      MIT
 // @match        https://www.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
@@ -17,12 +18,23 @@
 // Apenas YouTube desktop: no m.youtube.com não existem os mecanismos de
 // navegação usados aqui, e trancar o loop lá deixaria o Short congelado.
 //
-// Invariante central: SÓ se avança se o utilizador viu mesmo ESTE Short até
-// (perto d)o fim — medido por reprodução contínua acumulada (maxPlayed),
-// validada contra uma duração TRANCADA só depois de calibrada com leituras
-// concordantes fora de janelas de resize. Sinais transitórios (reloads de
-// qualidade, flags sujas do elemento reutilizado, durações falsas) não
-// conseguem falsificar reprodução contínua nem envenenar a calibração.
+// Invariante central: só se avança DE IMEDIATO se o utilizador viu mesmo
+// ESTE Short até (perto d)o fim — medido por reprodução CONTÍNUA acumulada
+// (maxPlayed, que só cresce quando a cabeça de leitura está mesmo em cima
+// dele), validada contra uma duração TRANCADA só depois de calibrada com
+// leituras concordantes fora de janelas de resize. Sinais transitórios
+// (reloads de qualidade, flags sujas do elemento reutilizado, durações
+// falsas) não conseguem falsificar reprodução contínua nem envenenar a
+// calibração.
+//
+// Um fim SEM esse crédito (salto para o fim, calibração adiada) não é
+// ignorado — passa por confirmação por persistência, que os transitórios
+// não sobrevivem. Trancar o loop e depois não avançar deixaria o Short
+// congelado no último frame, que é pior do que o comportamento nativo.
+//
+// Rede de segurança: se duas tentativas seguidas de avanço não mudarem o
+// URL (o YouTube mexeu no DOM e os fallbacks deixaram de servir), o script
+// devolve o loop nativo e desliga-se em vez de deixar tudo congelado.
 
 (function () {
   'use strict';
@@ -36,11 +48,17 @@
 
   // Estado por Short (reposto quando o URL muda)
   let maxPlayed = 0;           // ponto mais avançado em reprodução CONTÍNUA
+  let creditAnchored = false;  // maxPlayed já está ancorado nesta reprodução
   let stableDuration = 0;      // duração TRANCADA após calibração
   let durSamples = [];         // amostras de duração à espera de confirmação
   let firstSampleAt = 0;       // media-time da 1.ª amostra (exigir extensão)
   let mediaConfirmed = true;   // já há prova de que o <video> toca ESTE Short
   let provisionalEndedAt = 0;  // "ended" à espera de confirmação por persistência
+
+  // Vigia dos avanços (rede de segurança contra mudanças de DOM do YouTube)
+  let advanceAt = 0;           // tentativa de avanço por confirmar
+  let failedAdvances = 0;      // tentativas seguidas que não mudaram o URL
+  let disabled = false;        // desistimos: loop devolvido ao YouTube
 
   const lockedVideos = new WeakSet();
 
@@ -53,6 +71,7 @@
   }
   window.addEventListener('resize', suppress);
   document.addEventListener('fullscreenchange', suppress);
+  document.addEventListener('webkitfullscreenchange', suppress);
 
   function isShortsPage() {
     return location.pathname.startsWith('/shorts/');
@@ -60,6 +79,7 @@
 
   function resetShortState() {
     maxPlayed = 0;
+    creditAnchored = false;
     stableDuration = 0;
     durSamples = [];
     firstSampleAt = 0;
@@ -93,9 +113,43 @@
         configurable: true,
       });
       lockedVideos.add(v);
-    } catch (e) {
+    } catch {
       v.loop = false; // fallback: pelo menos desligar agora
     }
+  }
+
+  // Devolve a propriedade nativa (a nossa é configurable, por isso o delete
+  // repõe o acessor do protótipo). Sem isto, o elemento ficava com o loop
+  // preso a false para sempre, mesmo fora dos Shorts.
+  function unlockLoop(v) {
+    try { delete v.loop; } catch { /* nada a fazer */ }
+    lockedVideos.delete(v);
+  }
+
+  // Larga o elemento por completo: listeners fora e loop devolvido.
+  function releaseVideo(v) {
+    if (!v) return;
+    v.removeEventListener('ended', onEnded);
+    v.removeEventListener('timeupdate', onTimeUpdate);
+    v.removeEventListener('seeked', onSeeked);
+    v.removeEventListener('loadstart', onMediaSwap);
+    v.removeEventListener('durationchange', onMediaSwap);
+    v.removeEventListener('emptied', onMediaSwap);
+    unlockLoop(v);
+  }
+
+  // Os fallbacks de navegação deixaram de funcionar: não faz sentido manter
+  // o loop trancado, porque isso deixa o Short parado no último frame — um
+  // estado que o YouTube sozinho nunca produz. Repomos e saímos de cena.
+  function giveUp() {
+    disabled = true;
+    const v = currentVideo;
+    releaseVideo(v);
+    if (v) { try { v.loop = true; } catch { /* nada a fazer */ } }
+    currentVideo = null;
+    console.warn('[YT Shorts Auto Scroll] Duas tentativas de avanço seguidas não ' +
+      'mudaram o URL — os seletores devem estar desatualizados. Devolvi o loop ' +
+      'nativo e desliguei-me; recarrega a página para tentar outra vez.');
   }
 
   // Verdade fundamental: o utilizador viu este Short até (perto d)o fim?
@@ -105,6 +159,7 @@
 
   // Avança para o próximo Short (só chamado depois dos guardas de estado).
   function nextShort() {
+    if (disabled) return;
     const now = Date.now();
     if (now < suppressUntil) {
       // fim genuíno em plena janela pós-resize: fica pendente e o
@@ -112,12 +167,19 @@
       pendingAdvance = true;
       return;
     }
+    if (advanceAt) return;                  // tentativa anterior por confirmar
     if (now - lastAdvanceAt < 1500) return; // evita duplo avanço
     pendingAdvance = false;
     lastAdvanceAt = now;
+    advanceAt = now;
 
     // 1) Botão nativo "vídeo seguinte", se estiver visível.
-    const downBtn = document.querySelector('#navigation-button-down button, [aria-label="Next video"], [aria-label="Vídeo seguinte"]');
+    //    Cada seletor é testado à vez: numa lista separada por vírgulas o
+    //    querySelector devolveria o primeiro em ordem de DOCUMENTO, não o
+    //    primeiro da lista, e a prioridade pretendida perdia-se.
+    const downBtn = document.querySelector('#navigation-button-down button') ||
+                    document.querySelector('[aria-label="Next video"]') ||
+                    document.querySelector('[aria-label="Vídeo seguinte"]');
     if (downBtn && downBtn.offsetParent !== null) {
       downBtn.click();
       return;
@@ -128,7 +190,7 @@
     //    contexto da página, por isso temos acesso direto.
     const shorts = document.querySelector('ytd-shorts');
     if (shorts && typeof shorts.handleNextButtonClick === 'function') {
-      try { shorts.handleNextButtonClick(); return; } catch (e) { /* segue */ }
+      try { shorts.handleNextButtonClick(); return; } catch { /* segue */ }
     }
 
     // 3) Clique no botão mesmo escondido (alguns layouts aceitam).
@@ -137,23 +199,31 @@
       return;
     }
 
-    // 4) Último recurso: scroll do contentor de reels.
-    const reel = document.querySelector('#shorts-container, ytd-shorts');
+    // 4) Último recurso: scroll do contentor de reels (mesma ordem
+    //    explícita que em 1 — o contentor interno tem prioridade).
+    const reel = document.querySelector('#shorts-container') ||
+                 document.querySelector('ytd-shorts');
     if (reel) {
       reel.scrollBy({ top: window.innerHeight, behavior: 'smooth' });
     }
   }
 
+  // Posição a partir da qual um "ended" é plausível. Serve para descartar
+  // "ended" absurdos (um transitório de reload a meio do vídeo) sem exigir
+  // a duração trancada, que pode ainda não existir.
+  function endIsPlausible(v) {
+    const d = stableDuration || (Number.isFinite(v.duration) ? v.duration : 0);
+    return d > 0 && v.currentTime >= d - 1.5;
+  }
+
   function onEnded() {
     if (!isShortsPage() || !mediaConfirmed) return;
     if (watchedToEnd()) nextShort();
-    // Sem duração trancada (Short muito curto, seek cedo para o fim,
-    // calibração adiada por resizes): não ignorar o fim genuíno — fica
-    // provisório e o tick confirma-o por persistência (um "ended" falso
-    // de reload não sobrevive: o YouTube retoma a reprodução).
-    else if (!stableDuration && !provisionalEndedAt) {
-      provisionalEndedAt = Date.now();
-    }
+    // Fim sem crédito de reprodução contínua (Short muito curto, salto para
+    // o fim, calibração adiada por resizes): não ignorar — fica provisório
+    // e o tick confirma-o por persistência. Um "ended" falso de reload não
+    // sobrevive: o YouTube retoma a reprodução.
+    else if (!provisionalEndedAt) provisionalEndedAt = Date.now();
   }
 
   // Mede a reprodução contínua. Deltas anormais (seek, reload de
@@ -182,7 +252,7 @@
     //  - 3+ leituras concordantes espalhadas por >=1.2s de reprodução.
     // Depois de trancada, fica trancada para este Short.
     if (!stableDuration && Date.now() >= suppressUntil &&
-        v.duration && isFinite(v.duration) && v.duration > 1 &&
+        v.duration && Number.isFinite(v.duration) && v.duration > 1 &&
         v.duration > t + Math.min(2, v.duration / 2)) {
       if (durSamples.length === 0) firstSampleAt = t;
       durSamples.push(v.duration);
@@ -203,26 +273,63 @@
       pendingAdvance = false;
     }
 
-    if (t > maxPlayed) maxPlayed = t;
+    // Crédito de reprodução. maxPlayed só cresce por CONTINUIDADE: a cabeça
+    // de leitura tem de estar em cima dele (a menos de um delta). Sem isto,
+    // um salto para a frente ganhava crédito total no evento seguinte — o
+    // lastTime é atualizado mesmo nos eventos descartados, portanto o salto
+    // custava apenas um timeupdate e a invariante era só aparente.
+    if (!creditAnchored) {
+      creditAnchored = true;
+      maxPlayed = t; // ancorar onde a reprodução realmente começou
+    } else if (t > maxPlayed && t - maxPlayed <= delta + 0.05) {
+      maxPlayed = t;
+    }
+
     if (stableDuration && t >= stableDuration - 0.35 && watchedToEnd()) {
       nextShort();
     }
   }
 
   // Rebobinar exige voltar a ver até ao fim (senão, um sinal falso após
-  // um rewind podia reaproveitar um maxPlayed antigo).
+  // um rewind podia reaproveitar um maxPlayed antigo). Saltar para a frente
+  // consome a âncora sem dar crédito: a reprodução recomeça mais à frente
+  // do que o maxPlayed, e a continuidade nunca chega a fechar.
   function onSeeked(e) {
-    maxPlayed = Math.min(maxPlayed, e.target.currentTime);
+    const t = e.target.currentTime;
+    if (t < maxPlayed) {
+      maxPlayed = t;
+      creditAnchored = false; // volta a ancorar na posição nova
+    } else {
+      creditAnchored = true;
+    }
   }
 
   function tick() {
-    // Navegou para outro Short (manual ou automático): estado limpo.
+    if (disabled) return;
+
+    // Navegou para outro Short (manual ou automático): estado limpo. Isto
+    // também confirma que a última tentativa de avanço resultou.
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
       resetShortState();
+      advanceAt = 0;
+      failedAdvances = 0;
     }
 
-    if (!isShortsPage()) return;
+    // Vigia: tentámos avançar e o URL não mexeu. Duas seguidas e desistimos,
+    // devolvendo o loop — melhor o comportamento nativo do que um Short
+    // congelado sem explicação.
+    if (advanceAt && Date.now() - advanceAt > 2500) {
+      advanceAt = 0;
+      if (++failedAdvances >= 2) { giveUp(); return; }
+    }
+
+    if (!isShortsPage()) {
+      // Fora dos Shorts não temos nada a fazer neste elemento — e deixar o
+      // loop trancado nele afetaria o leitor normal se o YouTube o reciclar.
+      if (currentVideo) { releaseVideo(currentVideo); currentVideo = null; }
+      return;
+    }
 
     // Avanço que ficou pendente durante a janela pós-resize — REVALIDADO
     // no momento do disparo (um rewind entretanto cancela-o).
@@ -255,30 +362,23 @@
         return;
       }
 
-      // Fim provisório (sem duração trancada): confirmar por persistência.
-      // Se um "ended" sobrevive >=1.2s com o vídeo parado, é um fim real —
-      // um transitório de reload teria retomado a reprodução entretanto.
-      if (!stableDuration && video.ended) {
+      // Fim sem crédito: confirmar por persistência. Se um "ended" numa
+      // posição plausível sobrevive >=1.2s, é um fim real — um transitório
+      // de reload teria retomado a reprodução entretanto.
+      if (video.ended && endIsPlausible(video)) {
         const now = Date.now();
         if (!provisionalEndedAt) {
           provisionalEndedAt = now;
         } else if (now - provisionalEndedAt >= 1200 && now >= suppressUntil) {
           nextShort();
         }
-      } else if (provisionalEndedAt && !video.ended) {
-        provisionalEndedAt = 0; // retomou: era transitório
+      } else if (provisionalEndedAt) {
+        provisionalEndedAt = 0; // retomou (ou nem estava no fim): transitório
       }
       return;
     }
 
-    if (currentVideo) {
-      currentVideo.removeEventListener('ended', onEnded);
-      currentVideo.removeEventListener('timeupdate', onTimeUpdate);
-      currentVideo.removeEventListener('seeked', onSeeked);
-      currentVideo.removeEventListener('loadstart', onMediaSwap);
-      currentVideo.removeEventListener('durationchange', onMediaSwap);
-      currentVideo.removeEventListener('emptied', onMediaSwap);
-    }
+    if (currentVideo) releaseVideo(currentVideo);
 
     currentVideo = video;
     lastTime = -1;

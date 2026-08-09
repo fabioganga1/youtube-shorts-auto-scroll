@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.7.0
+// @version      1.8.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
 // @license      MIT
-// @match        https://www.youtube.com/*
+// @match        https://www.youtube.com/shorts/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
 // @run-at       document-idle
@@ -36,13 +36,18 @@
 // URL (o YouTube mexeu no DOM e os fallbacks deixaram de servir), o script
 // devolve o loop nativo e desliga-se em vez de deixar tudo congelado.
 //
-// Âmbito: o @match TEM de cobrir todo o youtube.com. O Tampermonkey injeta
-// na carga do documento e o YouTube entra nos Shorts por pushState, por
-// isso um @match só de /shorts/* nunca chegaria a ser injetado ao navegar
-// a partir do resto do site. O que se garante é que fora dos Shorts o
-// script não FAZ nada: o motor (intervalo de 500 ms, listeners de resize,
-// listeners do <video>, tranca do loop) só existe enquanto o URL for
-// /shorts/. Fora dele resta uma comparação de string de 2 em 2 segundos.
+// Âmbito: DUAS trancas, porque o @match sozinho não chega nos dois sentidos.
+//   1) @match .../shorts/* — o script nem chega a ser injetado quando abres
+//      um vídeo normal do YouTube. Não existe lá, ponto final.
+//   2) Motor por rota — uma vez injetado, o script sobrevive à navegação SPA
+//      da sessão. Se a partir dos Shorts fores parar a um /watch, o motor
+//      (intervalo de 500 ms, listeners de resize/fullscreen, listeners do
+//      <video>, tranca do loop) é DESMONTADO; fica só uma comparação de
+//      string de 2 em 2 segundos até voltares aos Shorts.
+// Custo conhecido de (1): o Tampermonkey injeta na carga do documento e o
+// YouTube entra nos Shorts por pushState, por isso chegar aos Shorts a
+// partir do resto do site (homepage, barra lateral) não injeta nada —
+// nessa primeira vez é preciso um F5.
 
 (function () {
   'use strict';
@@ -440,9 +445,10 @@
 
   document.addEventListener('yt-navigate-finish', route);
   window.addEventListener('popstate', route);
-  // Rede de segurança caso o evento do YouTube mude de nome: fora dos Shorts
-  // este é o ÚNICO trabalho do script — uma comparação de string de 2 em 2
-  // segundos, sem tocar no DOM. Com o motor a andar nem isso corre.
+  // Rede de segurança caso o evento do YouTube mude de nome. Fora dos Shorts
+  // (só alcançável por navegação SPA, já que o @match é /shorts/*) este é o
+  // ÚNICO trabalho do script: uma comparação de string de 2 em 2 segundos,
+  // sem tocar no DOM. Com o motor a andar nem isso corre.
   routeTimer = setInterval(() => { if (!engineTimer) route(); }, 2000);
   route();
 })();

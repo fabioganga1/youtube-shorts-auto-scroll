@@ -40,6 +40,21 @@ As atualizações chegam automaticamente via Tampermonkey (`@updateURL`).
 - Funciona com a navegação SPA do YouTube (não é preciso recarregar a página).
   Ao sair dos Shorts, larga o elemento `<video>` e destranca o `loop`.
 
+## Só corre nos Shorts
+
+O `@match` cobre todo o `youtube.com`, e **tem** de cobrir: o Tampermonkey
+injeta os scripts na carga do documento, e o YouTube entra nos Shorts por
+`pushState` (sem recarregar). Um `@match` limitado a `/shorts/*` nunca chegaria
+a ser injetado quando entras nos Shorts a partir do resto do site — só se
+abrisses o URL de um Short diretamente.
+
+O que se garante é que **fora dos Shorts o script não faz nada**. O motor
+(intervalo de 500 ms, listeners de `resize`/`fullscreen`, listeners do
+`<video>`, tranca do `loop`) só existe enquanto o URL for `/shorts/…`; ao sair,
+é todo desmontado. Num vídeo normal do YouTube resta uma comparação de string
+de 2 em 2 segundos — que nem sequer corre enquanto o motor está ligado — e
+nenhum contacto com o leitor.
+
 ## Ligar / desligar
 
 Para desativar o auto-scroll, desliga o próprio script no painel do

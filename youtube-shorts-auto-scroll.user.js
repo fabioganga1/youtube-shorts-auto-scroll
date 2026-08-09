@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.6.0
+// @version      1.7.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -35,6 +35,14 @@
 // Rede de segurança: se duas tentativas seguidas de avanço não mudarem o
 // URL (o YouTube mexeu no DOM e os fallbacks deixaram de servir), o script
 // devolve o loop nativo e desliga-se em vez de deixar tudo congelado.
+//
+// Âmbito: o @match TEM de cobrir todo o youtube.com. O Tampermonkey injeta
+// na carga do documento e o YouTube entra nos Shorts por pushState, por
+// isso um @match só de /shorts/* nunca chegaria a ser injetado ao navegar
+// a partir do resto do site. O que se garante é que fora dos Shorts o
+// script não FAZ nada: o motor (intervalo de 500 ms, listeners de resize,
+// listeners do <video>, tranca do loop) só existe enquanto o URL for
+// /shorts/. Fora dele resta uma comparação de string de 2 em 2 segundos.
 
 (function () {
   'use strict';
@@ -60,18 +68,22 @@
   let failedAdvances = 0;      // tentativas seguidas que não mudaram o URL
   let disabled = false;        // desistimos: loop devolvido ao YouTube
 
+  // Motor: só existe enquanto estivermos num /shorts/
+  let engineTimer = null;
+  let routeTimer = 0;
+  let booted = false;          // já arrancámos alguma vez nesta página?
+
   const lockedVideos = new WeakSet();
 
   // Ao redimensionar/alternar fullscreen, o YouTube recarrega o vídeo
   // noutra qualidade — não avançamos nem CALIBRAMOS durante esses instantes
-  // (as durações reportadas no reload não são de confiança).
+  // (as durações reportadas no reload não são de confiança). Estes listeners
+  // são ligados pelo motor e desligados com ele: num vídeo normal do YouTube
+  // redimensionar a janela não chega sequer a chamar isto.
   function suppress() {
     suppressUntil = Date.now() + 2000;
     if (!stableDuration) { durSamples = []; firstSampleAt = 0; }
   }
-  window.addEventListener('resize', suppress);
-  document.addEventListener('fullscreenchange', suppress);
-  document.addEventListener('webkitfullscreenchange', suppress);
 
   function isShortsPage() {
     return location.pathname.startsWith('/shorts/');
@@ -144,9 +156,9 @@
   function giveUp() {
     disabled = true;
     const v = currentVideo;
-    releaseVideo(v);
+    stopEngine();
+    if (routeTimer) { clearInterval(routeTimer); routeTimer = 0; }
     if (v) { try { v.loop = true; } catch { /* nada a fazer */ } }
-    currentVideo = null;
     console.warn('[YT Shorts Auto Scroll] Duas tentativas de avanço seguidas não ' +
       'mudaram o URL — os seletores devem estar desatualizados. Devolvi o loop ' +
       'nativo e desliguei-me; recarrega a página para tentar outra vez.');
@@ -324,12 +336,10 @@
       if (++failedAdvances >= 2) { giveUp(); return; }
     }
 
-    if (!isShortsPage()) {
-      // Fora dos Shorts não temos nada a fazer neste elemento — e deixar o
-      // loop trancado nele afetaria o leitor normal se o YouTube o reciclar.
-      if (currentVideo) { releaseVideo(currentVideo); currentVideo = null; }
-      return;
-    }
+    // Saímos dos Shorts entre dois ticks: desliga tudo já, sem esperar pelo
+    // evento de navegação. Deixar o loop trancado no elemento afetaria o
+    // leitor normal se o YouTube o reciclar.
+    if (!isShortsPage()) { stopEngine(); return; }
 
     // Avanço que ficou pendente durante a janela pós-resize — REVALIDADO
     // no momento do disparo (um rewind entretanto cancela-o).
@@ -391,8 +401,48 @@
     video.addEventListener('emptied', onMediaSwap);
   }
 
-  // O YouTube é uma SPA: o vídeo troca sem recarregar a página,
-  // por isso verificamos periodicamente qual é o vídeo ativo.
-  setInterval(tick, 500);
-  document.addEventListener('yt-navigate-finish', tick);
+  // ---------------------------------------------------------------------
+  // Motor: liga só nos Shorts, desliga ao sair.
+  // ---------------------------------------------------------------------
+
+  function startEngine() {
+    if (engineTimer || disabled) return;
+    lastPath = location.pathname;
+    // No arranque a frio (a página abriu já num Short) o estado inicial já
+    // é o estado limpo, e não há cauda de Short anterior a desconfiar —
+    // repor aqui poria o mediaConfirmed a false sem necessidade.
+    if (booted) resetShortState(); else booted = true;
+    window.addEventListener('resize', suppress);
+    document.addEventListener('fullscreenchange', suppress);
+    document.addEventListener('webkitfullscreenchange', suppress);
+    // O YouTube é uma SPA: o vídeo troca sem recarregar a página, por isso
+    // verificamos periodicamente qual é o vídeo ativo.
+    engineTimer = setInterval(tick, 500);
+    tick();
+  }
+
+  function stopEngine() {
+    if (engineTimer) { clearInterval(engineTimer); engineTimer = null; }
+    window.removeEventListener('resize', suppress);
+    document.removeEventListener('fullscreenchange', suppress);
+    document.removeEventListener('webkitfullscreenchange', suppress);
+    if (currentVideo) { releaseVideo(currentVideo); currentVideo = null; }
+    pendingAdvance = false;
+    advanceAt = 0;
+    failedAdvances = 0;
+  }
+
+  function route() {
+    if (disabled) return;
+    if (isShortsPage()) startEngine();
+    else stopEngine();
+  }
+
+  document.addEventListener('yt-navigate-finish', route);
+  window.addEventListener('popstate', route);
+  // Rede de segurança caso o evento do YouTube mude de nome: fora dos Shorts
+  // este é o ÚNICO trabalho do script — uma comparação de string de 2 em 2
+  // segundos, sem tocar no DOM. Com o motor a andar nem isso corre.
+  routeTimer = setInterval(() => { if (!engineTimer) route(); }, 2000);
+  route();
 })();

@@ -33,37 +33,29 @@ As atualizações chegam automaticamente via Tampermonkey (`@updateURL`).
   loop e não avançar deixaria o Short congelado no último frame.
 - Para avançar tenta, por ordem: botão nativo "vídeo seguinte" → método
   interno do componente `ytd-shorts` → clique no botão escondido → scroll.
-- **Rede de segurança**: se duas tentativas seguidas não mudarem o URL (sinal
-  de que o YouTube mexeu no DOM e os seletores ficaram obsoletos), o script
-  devolve o loop nativo, desliga-se e avisa na consola — em vez de deixar o
-  vídeo parado sem explicação.
+- **Nunca deixa o vídeo congelado**: às vezes o YouTube não tem o próximo
+  Short na fila (verificado ao vivo: o clique no botão não navega porque não
+  há para onde ir). Nesse caso o script devolve o loop nativo e retoma a
+  reprodução — o Short repete, como o YouTube faria — e volta a tentar a cada
+  passagem pelo fim. Só após 5 falhas seguidas desiste de vez (seletores
+  obsoletos), sempre com o vídeo a repetir e um aviso na consola.
 - Funciona com a navegação SPA do YouTube (não é preciso recarregar a página).
   Ao sair dos Shorts, larga o elemento `<video>` e destranca o `loop`.
 
 ## Só corre nos Shorts
 
-Duas trancas:
+O `@match` cobre todo o `youtube.com`, e **tem** de cobrir: o Tampermonkey
+injeta os scripts na carga do documento, e o YouTube entra nos Shorts por
+`pushState` (sem recarregar) — um `@match` limitado a `/shorts/*` deixava o
+script por injetar quando se entrava nos Shorts pela homepage ou pela barra
+lateral (verificado na prática: era uma das causas do "às vezes não
+funciona", na v1.8.0).
 
-1. **`@match https://www.youtube.com/shorts/*`** — num vídeo normal do YouTube
-   o script nem chega a ser injetado. Não existe na página, ponto final.
-2. **Motor por rota** — uma vez injetado, o script sobrevive à navegação SPA
-   da sessão. Se a partir dos Shorts fores parar a um `/watch`, o motor
-   (intervalo de 500 ms, listeners de `resize`/`fullscreen`, listeners do
-   `<video>`, tranca do `loop`) é desmontado na hora. Fica só uma comparação
-   de string de 2 em 2 segundos — que nem sequer corre enquanto estás nos
-   Shorts — e nenhum contacto com o leitor.
-
-### O F5 da primeira vez
-
-O Tampermonkey injeta os scripts na carga do documento, e o YouTube entra nos
-Shorts por `pushState` (sem recarregar). Consequência: se abrires o YouTube na
-homepage e depois clicares em **Shorts**, o script não é injetado — carrega
-**F5** uma vez e fica a funcionar durante o resto da sessão. Se abrires um
-link de Short diretamente, ou tiveres os Shorts nos favoritos, isto não te
-acontece.
-
-É uma troca deliberada: prefere-se um F5 ocasional a ter o script presente em
-todas as páginas do YouTube.
+A regra "desativado fora dos Shorts" é garantida pelo **motor**: o intervalo
+de 500 ms, os listeners de `resize`/`fullscreen`, os listeners do `<video>` e
+a tranca do `loop` só existem enquanto o URL for `/shorts/…`; ao sair, é tudo
+desmontado na hora. Num vídeo normal do YouTube resta uma comparação de
+string de 2 em 2 segundos e nenhum contacto com o leitor.
 
 ## Ligar / desligar
 

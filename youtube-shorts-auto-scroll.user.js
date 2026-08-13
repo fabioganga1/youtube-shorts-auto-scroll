@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.8.0
+// @version      1.9.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
 // @license      MIT
-// @match        https://www.youtube.com/shorts/*
+// @match        https://www.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
 // @run-at       document-idle
@@ -32,22 +32,22 @@
 // não sobrevivem. Trancar o loop e depois não avançar deixaria o Short
 // congelado no último frame, que é pior do que o comportamento nativo.
 //
-// Rede de segurança: se duas tentativas seguidas de avanço não mudarem o
-// URL (o YouTube mexeu no DOM e os fallbacks deixaram de servir), o script
-// devolve o loop nativo e desliga-se em vez de deixar tudo congelado.
+// Rede de segurança: se um avanço não mudar o URL (fila do YouTube sem
+// próximo Short — verificado ao vivo: o clique no botão não navega porque
+// não há para onde ir), NUNCA deixar o vídeo congelado no último frame.
+// Devolve-se o loop nativo e retoma-se a reprodução — o Short repete como
+// o YouTube faria — e tenta-se outra vez a cada passagem pelo fim. Só após
+// 5 falhas seguidas é que se desiste de vez (seletores obsoletos), sempre
+// com o vídeo a repetir, nunca parado.
 //
-// Âmbito: DUAS trancas, porque o @match sozinho não chega nos dois sentidos.
-//   1) @match .../shorts/* — o script nem chega a ser injetado quando abres
-//      um vídeo normal do YouTube. Não existe lá, ponto final.
-//   2) Motor por rota — uma vez injetado, o script sobrevive à navegação SPA
-//      da sessão. Se a partir dos Shorts fores parar a um /watch, o motor
-//      (intervalo de 500 ms, listeners de resize/fullscreen, listeners do
-//      <video>, tranca do loop) é DESMONTADO; fica só uma comparação de
-//      string de 2 em 2 segundos até voltares aos Shorts.
-// Custo conhecido de (1): o Tampermonkey injeta na carga do documento e o
-// YouTube entra nos Shorts por pushState, por isso chegar aos Shorts a
-// partir do resto do site (homepage, barra lateral) não injeta nada —
-// nessa primeira vez é preciso um F5.
+// Âmbito: o @match cobre todo o youtube.com e TEM de cobrir. O Tampermonkey
+// injeta na carga do documento e o YouTube entra nos Shorts por pushState;
+// um @match só de /shorts/* não injeta nada quando se chega aos Shorts pela
+// homepage/barra lateral (verificado na prática: era uma das causas do
+// "às vezes não funciona"). A regra "desativado fora dos Shorts" é garantida
+// pelo MOTOR: o intervalo de 500 ms, os listeners de resize/fullscreen, os
+// listeners do <video> e a tranca do loop só existem enquanto o URL for
+// /shorts/. Fora dele resta uma comparação de string de 2 em 2 segundos.
 
 (function () {
   'use strict';
@@ -68,9 +68,10 @@
   let mediaConfirmed = true;   // já há prova de que o <video> toca ESTE Short
   let provisionalEndedAt = 0;  // "ended" à espera de confirmação por persistência
 
-  // Vigia dos avanços (rede de segurança contra mudanças de DOM do YouTube)
+  // Vigia dos avanços (rede de segurança contra fila vazia / DOM mudado)
   let advanceAt = 0;           // tentativa de avanço por confirmar
   let failedAdvances = 0;      // tentativas seguidas que não mudaram o URL
+  let stalled = false;         // a falhar: loop nativo devolvido até o URL mudar
   let disabled = false;        // desistimos: loop devolvido ao YouTube
 
   // Motor: só existe enquanto estivermos num /shorts/
@@ -155,18 +156,34 @@
     unlockLoop(v);
   }
 
-  // Os fallbacks de navegação deixaram de funcionar: não faz sentido manter
-  // o loop trancado, porque isso deixa o Short parado no último frame — um
-  // estado que o YouTube sozinho nunca produz. Repomos e saímos de cena.
+  // Os fallbacks de navegação deixaram de funcionar de vez: não faz sentido
+  // manter o loop trancado, porque isso deixa o Short parado no último
+  // frame — um estado que o YouTube sozinho nunca produz. Repomos o loop,
+  // RETOMAMOS a reprodução (um vídeo terminado não recomeça sozinho só por
+  // se lhe repor o loop) e saímos de cena.
   function giveUp() {
     disabled = true;
     const v = currentVideo;
     stopEngine();
     if (routeTimer) { clearInterval(routeTimer); routeTimer = 0; }
-    if (v) { try { v.loop = true; } catch { /* nada a fazer */ } }
-    console.warn('[YT Shorts Auto Scroll] Duas tentativas de avanço seguidas não ' +
-      'mudaram o URL — os seletores devem estar desatualizados. Devolvi o loop ' +
-      'nativo e desliguei-me; recarrega a página para tentar outra vez.');
+    resumeNativeLoop(v);
+    console.warn('[YT Shorts Auto Scroll] Cinco tentativas de avanço seguidas não ' +
+      'mudaram o URL — fila do YouTube vazia ou seletores desatualizados. ' +
+      'Devolvi o loop nativo e desliguei-me; recarrega a página para reativar.');
+  }
+
+  // Devolve o comportamento nativo AGORA: loop ligado e a tocar. Usado
+  // quando um avanço falha — o pior estado possível é o vídeo congelado.
+  function resumeNativeLoop(v) {
+    if (!v) return;
+    unlockLoop(v);
+    try {
+      v.loop = true;
+      if (v.paused) {
+        const p = v.play();
+        if (p && p.catch) p.catch(() => {});
+      }
+    } catch { /* nada a fazer */ }
   }
 
   // Verdade fundamental: o utilizador viu este Short até (perto d)o fim?
@@ -331,14 +348,21 @@
       resetShortState();
       advanceAt = 0;
       failedAdvances = 0;
+      stalled = false;
     }
 
-    // Vigia: tentámos avançar e o URL não mexeu. Duas seguidas e desistimos,
-    // devolvendo o loop — melhor o comportamento nativo do que um Short
-    // congelado sem explicação.
+    // Vigia: tentámos avançar e o URL não mexeu (fila do YouTube sem próximo
+    // Short, ou seletores mortos). NUNCA ficar congelado: devolve-se já o
+    // loop nativo e retoma-se a reprodução — o Short repete como o YouTube
+    // faria — e o fast-path do timeupdate tenta outra vez a cada passagem
+    // pelo fim (a fila pode entretanto ter chegado). Só à 5.ª falha seguida
+    // é que se desiste de vez.
     if (advanceAt && Date.now() - advanceAt > 2500) {
       advanceAt = 0;
-      if (++failedAdvances >= 2) { giveUp(); return; }
+      failedAdvances++;
+      stalled = true;
+      resumeNativeLoop(currentVideo);
+      if (failedAdvances >= 5) { giveUp(); return; }
     }
 
     // Saímos dos Shorts entre dois ticks: desliga tudo já, sem esperar pelo
@@ -360,9 +384,13 @@
                   document.querySelector('#shorts-player video');
     if (!video) return;
 
-    lockLoop(video);
-    // O YouTube pode contornar a tranca via setAttribute('loop').
-    if (video.hasAttribute('loop')) video.removeAttribute('loop');
+    // Em modo stalled o loop fica entregue ao YouTube — é o que mantém o
+    // vídeo a repetir enquanto não há para onde avançar. Não re-trancar.
+    if (!stalled) {
+      lockLoop(video);
+      // O YouTube pode contornar a tranca via setAttribute('loop').
+      if (video.hasAttribute('loop')) video.removeAttribute('loop');
+    }
 
     if (video === currentVideo) {
       if (!mediaConfirmed) return; // cauda do Short anterior: ignorar

@@ -31,6 +31,14 @@ As atualizações chegam automaticamente via Tampermonkey (`@updateURL`).
   `ended` acontecer numa posição plausível e sobreviver 1,2 s, é um fim real
   (um transitório de reload teria retomado a reprodução). Sem isto, trancar o
   loop e não avançar deixaria o Short congelado no último frame.
+- **A confirmação exige prova de reprodução deste Short** (arranque perto do
+  início ou um seek real): na transição entre Shorts, o elemento `<video>` é
+  reutilizado e a *cauda* do Short anterior continua a tocar enquanto o novo
+  carrega — o `ended` dessa cauda parecia um fim legítimo e disparava avanços
+  em cadeia, sobretudo ao redimensionar a janela (o resize provoca reloads que
+  "confirmavam" a troca de media antes de tempo) e com rede lenta. Corrigido
+  na v1.10.0: sinais de media durante a janela pós-resize não levantam a
+  quarentena, e a cauda nunca ganha crédito.
 - Para avançar tenta, por ordem: botão nativo "vídeo seguinte" → método
   interno do componente `ytd-shorts` → clique no botão escondido → scroll.
 - **Nunca deixa o vídeo congelado**: às vezes o YouTube não tem o próximo

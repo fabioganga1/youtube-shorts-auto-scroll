@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.9.0
+// @version      1.10.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -29,8 +29,13 @@
 //
 // Um fim SEM esse crédito (salto para o fim, calibração adiada) não é
 // ignorado — passa por confirmação por persistência, que os transitórios
-// não sobrevivem. Trancar o loop e depois não avançar deixaria o Short
-// congelado no último frame, que é pior do que o comportamento nativo.
+// não sobrevivem. A persistência exige na mesma a ÂNCORA de reprodução
+// (arranque perto de 0 ou seek real NESTE Short): sem ela, o "ended" da
+// cauda do Short anterior — que continua a tocar no elemento reutilizado
+// enquanto o media novo carrega — avançava em cadeia. Era o "ressalta
+// para os próximos vídeos" ao redimensionar a janela, e o mesmo com rede
+// lenta sem resize nenhum. Trancar o loop e depois não avançar deixaria o
+// Short congelado no último frame, pior do que o comportamento nativo.
 //
 // Rede de segurança: se um avanço não mudar o URL (fila do YouTube sem
 // próximo Short — verificado ao vivo: o clique no botão não navega porque
@@ -62,6 +67,7 @@
   // Estado por Short (reposto quando o URL muda)
   let maxPlayed = 0;           // ponto mais avançado em reprodução CONTÍNUA
   let creditAnchored = false;  // maxPlayed já está ancorado nesta reprodução
+  let reanchorNear = -1;       // rewind à espera de re-âncora perto do alvo
   let stableDuration = 0;      // duração TRANCADA após calibração
   let durSamples = [];         // amostras de duração à espera de confirmação
   let firstSampleAt = 0;       // media-time da 1.ª amostra (exigir extensão)
@@ -98,6 +104,7 @@
   function resetShortState() {
     maxPlayed = 0;
     creditAnchored = false;
+    reanchorNear = -1;
     stableDuration = 0;
     durSamples = [];
     firstSampleAt = 0;
@@ -112,6 +119,11 @@
   }
 
   function onMediaSwap() {
+    // Durante a janela pós-resize, loadstart/durationchange são ambíguos:
+    // tanto podem ser o media novo como o reload de qualidade do conteúdo
+    // ANTIGO (o resize provoca reloads). Não servem de prova nessa janela —
+    // o media novo confirma-se na mesma pelo arranque (currentTime < 2).
+    if (Date.now() < suppressUntil) return;
     mediaConfirmed = true;
   }
 
@@ -312,9 +324,16 @@
     // um salto para a frente ganhava crédito total no evento seguinte — o
     // lastTime é atualizado mesmo nos eventos descartados, portanto o salto
     // custava apenas um timeupdate e a invariante era só aparente.
+    // A âncora só se prende num ARRANQUE genuíno (t < 2) ou na retoma de um
+    // rewind real (perto do alvo pedido no onSeeked) — a cauda do Short
+    // anterior, que toca alto no elemento reutilizado, nunca pode virar
+    // crédito por si própria.
     if (!creditAnchored) {
-      creditAnchored = true;
-      maxPlayed = t; // ancorar onde a reprodução realmente começou
+      if (t < 2 || (reanchorNear >= 0 && t >= reanchorNear && t - reanchorNear < 3)) {
+        creditAnchored = true;
+        reanchorNear = -1;
+        maxPlayed = t; // ancorar onde a reprodução realmente recomeçou
+      }
     } else if (t > maxPlayed && t - maxPlayed <= delta + 0.05) {
       maxPlayed = t;
     }
@@ -325,16 +344,25 @@
   }
 
   // Rebobinar exige voltar a ver até ao fim (senão, um sinal falso após
-  // um rewind podia reaproveitar um maxPlayed antigo). Saltar para a frente
-  // consome a âncora sem dar crédito: a reprodução recomeça mais à frente
-  // do que o maxPlayed, e a continuidade nunca chega a fechar.
+  // um rewind podia reaproveitar um maxPlayed antigo). A re-âncora fica
+  // PENDENTE e prende-se na retoma (primeiro timeupdate contínuo), não no
+  // alvo do seek — o primeiro evento após um seek/wrap é rejeitado pelo
+  // filtro de deltas e a cabeça escapa uns passos à frente do alvo; ancorar
+  // no alvo deixava maxPlayed órfão e matava os retries do modo stalled.
+  // A janela de 3 s limita a re-âncora à vizinhança do alvo: um salto para
+  // a frente SEM evento seeked (transitório de reload) não a pode usar.
+  // Saltar para a frente ancora já, sem crédito: a reprodução recomeça mais
+  // à frente do que o maxPlayed e a continuidade nunca chega a fechar.
   function onSeeked(e) {
+    if (!mediaConfirmed) return; // seek da cauda antiga: não é deste Short
     const t = e.target.currentTime;
     if (t < maxPlayed) {
       maxPlayed = t;
-      creditAnchored = false; // volta a ancorar na posição nova
+      creditAnchored = false;
+      reanchorNear = t;
     } else {
       creditAnchored = true;
+      reanchorNear = -1;
     }
   }
 
@@ -407,13 +435,24 @@
 
       // Fim sem crédito: confirmar por persistência. Se um "ended" numa
       // posição plausível sobrevive >=1.2s, é um fim real — um transitório
-      // de reload teria retomado a reprodução entretanto.
-      if (video.ended && endIsPlausible(video)) {
+      // de reload teria retomado a reprodução entretanto. Exige-se a âncora
+      // (creditAnchored): prova de que a reprodução DESTE Short começou de
+      // verdade (arranque perto de 0 ou seek real). Sem ela, um "ended" da
+      // cauda do Short anterior avançava em cadeia — era o salto para os
+      // próximos vídeos ao redimensionar a janela (ou com rede lenta).
+      if (video.ended) {
         const now = Date.now();
-        if (!provisionalEndedAt) {
-          provisionalEndedAt = now;
-        } else if (now - provisionalEndedAt >= 1200 && now >= suppressUntil) {
-          nextShort();
+        if (!provisionalEndedAt) provisionalEndedAt = now;
+        if (creditAnchored && endIsPlausible(video)) {
+          if (now - provisionalEndedAt >= 1200 && now >= suppressUntil) {
+            nextShort();
+          }
+        } else if (now - provisionalEndedAt >= 5000) {
+          // Rede final anti-congelamento: um ended persistente que NUNCA
+          // vai poder avançar (sem âncora, ou em posição implausível) não
+          // fica parado — loop nativo de volta; a próxima navegação repõe.
+          stalled = true;
+          resumeNativeLoop(video);
         }
       } else if (provisionalEndedAt) {
         provisionalEndedAt = 0; // retomou (ou nem estava no fim): transitório
@@ -474,9 +513,8 @@
   document.addEventListener('yt-navigate-finish', route);
   window.addEventListener('popstate', route);
   // Rede de segurança caso o evento do YouTube mude de nome. Fora dos Shorts
-  // (só alcançável por navegação SPA, já que o @match é /shorts/*) este é o
-  // ÚNICO trabalho do script: uma comparação de string de 2 em 2 segundos,
-  // sem tocar no DOM. Com o motor a andar nem isso corre.
+  // este é o ÚNICO trabalho do script: uma comparação de string de 2 em 2
+  // segundos, sem tocar no DOM. Com o motor a andar nem isso corre.
   routeTimer = setInterval(() => { if (!engineTimer) route(); }, 2000);
   route();
 })();

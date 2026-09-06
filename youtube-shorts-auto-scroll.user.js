@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Shorts Auto Scroll
 // @namespace    https://github.com/fabioganga1
-// @version      1.10.0
+// @version      1.11.0
 // @description  Avança automaticamente para o próximo Short quando o vídeo termina (auto-scroll no YouTube Shorts)
 // @description:en  Automatically advances to the next Short when the video ends (auto-scroll for YouTube Shorts)
 // @author       fabioganga1
@@ -68,6 +68,7 @@
   let maxPlayed = 0;           // ponto mais avançado em reprodução CONTÍNUA
   let creditAnchored = false;  // maxPlayed já está ancorado nesta reprodução
   let reanchorNear = -1;       // rewind à espera de re-âncora perto do alvo
+  let freshStart = true;       // arranque a frio: sem cauda anterior no elemento
   let stableDuration = 0;      // duração TRANCADA após calibração
   let durSamples = [];         // amostras de duração à espera de confirmação
   let firstSampleAt = 0;       // media-time da 1.ª amostra (exigir extensão)
@@ -105,17 +106,39 @@
     maxPlayed = 0;
     creditAnchored = false;
     reanchorNear = -1;
+    freshStart = false;          // a partir daqui pode haver cauda anterior
     stableDuration = 0;
     durSamples = [];
     firstSampleAt = 0;
     lastTime = -1;
     pendingAdvance = false;
     provisionalEndedAt = 0;
+    stalled = false;             // estado por Short: URL novo é fila nova
     // O YouTube REUTILIZA o mesmo <video> entre Shorts: depois de mudar o
     // URL, a cauda do Short anterior ainda toca neste elemento. Até haver
     // prova de que o media trocou (loadstart/durationchange/emptied, ou
     // currentTime perto do início), ignoramos tudo o que ele emite.
     mediaConfirmed = false;
+  }
+
+  // Navegou para outro Short (manual ou automático): estado limpo. Isto
+  // também confirma que a última tentativa de avanço resultou. Chamado pelo
+  // tick E pelo evento de navegação do YouTube: quanto mais cedo, mais curta
+  // é a janela em que a cauda do Short anterior ainda é tomada pelo novo.
+  function syncPath() {
+    if (location.pathname === lastPath) return;
+    lastPath = location.pathname;
+    resetShortState();
+    advanceAt = 0;
+    failedAdvances = 0;
+  }
+
+  // Os eventos do <video> chegam ANTES de o tick/route notarem a navegação:
+  // nessa janela o URL já mudou mas o estado ainda é o do Short anterior —
+  // p.ex. o timeupdate final da cauda depois de o utilizador passar à frente
+  // à mão. Sem este guarda, o script avançava por cima da escolha manual.
+  function fromCurrentShort() {
+    return location.pathname === lastPath;
   }
 
   function onMediaSwap() {
@@ -203,6 +226,13 @@
     return stableDuration > 0 && maxPlayed >= stableDuration - 1.5;
   }
 
+  // offsetParent é null para elementos com position:fixed mesmo visíveis
+  // (verificado no layout do Fabio: o botão existia, offsetParent null, e a
+  // estratégia 1 nunca chegava a disparar). getClientRects não tem esse vício.
+  function isVisible(el) {
+    return el.getClientRects().length > 0;
+  }
+
   // Avança para o próximo Short (só chamado depois dos guardas de estado).
   function nextShort() {
     if (disabled) return;
@@ -226,7 +256,7 @@
     const downBtn = document.querySelector('#navigation-button-down button') ||
                     document.querySelector('[aria-label="Next video"]') ||
                     document.querySelector('[aria-label="Vídeo seguinte"]');
-    if (downBtn && downBtn.offsetParent !== null) {
+    if (downBtn && isVisible(downBtn)) {
       downBtn.click();
       return;
     }
@@ -263,7 +293,7 @@
   }
 
   function onEnded() {
-    if (!isShortsPage() || !mediaConfirmed) return;
+    if (!isShortsPage() || !fromCurrentShort() || !mediaConfirmed) return;
     if (watchedToEnd()) nextShort();
     // Fim sem crédito de reprodução contínua (Short muito curto, salto para
     // o fim, calibração adiada por resizes): não ignorar — fica provisório
@@ -276,6 +306,7 @@
   // qualidade, troca de vídeo) são ignorados — só o avanço natural do
   // relógio de reprodução conta para maxPlayed/stableDuration.
   function onTimeUpdate(e) {
+    if (!fromCurrentShort()) return; // cauda antiga: o URL já mudou
     const v = e.target;
     const t = v.currentTime;
     const delta = t - lastTime;
@@ -327,12 +358,16 @@
     // A âncora só se prende num ARRANQUE genuíno (t < 2) ou na retoma de um
     // rewind real (perto do alvo pedido no onSeeked) — a cauda do Short
     // anterior, que toca alto no elemento reutilizado, nunca pode virar
-    // crédito por si própria.
+    // crédito por si própria. Exceção: no arranque a frio (a página abriu já
+    // neste Short) o script pode chegar com o vídeo para lá dos 2 s — não há
+    // cauda anterior no elemento, a âncora é segura em qualquer posição.
     if (!creditAnchored) {
-      if (t < 2 || (reanchorNear >= 0 && t >= reanchorNear && t - reanchorNear < 3)) {
+      if (freshStart || t < 2 ||
+          (reanchorNear >= 0 && t >= reanchorNear && t - reanchorNear < 3)) {
         creditAnchored = true;
+        freshStart = false;
         reanchorNear = -1;
-        maxPlayed = t; // ancorar onde a reprodução realmente recomeçou
+        maxPlayed = t; // ancorar onde a reprodução realmente (re)começou
       }
     } else if (t > maxPlayed && t - maxPlayed <= delta + 0.05) {
       maxPlayed = t;
@@ -354,7 +389,7 @@
   // Saltar para a frente ancora já, sem crédito: a reprodução recomeça mais
   // à frente do que o maxPlayed e a continuidade nunca chega a fechar.
   function onSeeked(e) {
-    if (!mediaConfirmed) return; // seek da cauda antiga: não é deste Short
+    if (!fromCurrentShort() || !mediaConfirmed) return; // cauda antiga: não é deste Short
     const t = e.target.currentTime;
     if (t < maxPlayed) {
       maxPlayed = t;
@@ -369,15 +404,7 @@
   function tick() {
     if (disabled) return;
 
-    // Navegou para outro Short (manual ou automático): estado limpo. Isto
-    // também confirma que a última tentativa de avanço resultou.
-    if (location.pathname !== lastPath) {
-      lastPath = location.pathname;
-      resetShortState();
-      advanceAt = 0;
-      failedAdvances = 0;
-      stalled = false;
-    }
+    syncPath();
 
     // Vigia: tentámos avançar e o URL não mexeu (fila do YouTube sem próximo
     // Short, ou seletores mortos). NUNCA ficar congelado: devolve-se já o
@@ -502,12 +529,17 @@
     pendingAdvance = false;
     advanceAt = 0;
     failedAdvances = 0;
+    // Não pode sobreviver a uma saída dos Shorts: ao voltar, o tick nunca
+    // mais re-trancava o loop e o "ended" deixava de disparar.
+    stalled = false;
   }
 
   function route() {
     if (disabled) return;
-    if (isShortsPage()) startEngine();
-    else stopEngine();
+    if (!isShortsPage()) { stopEngine(); return; }
+    // Com o motor a andar, o evento de navegação sincroniza o Short novo já
+    // (sem esperar até 500 ms pelo tick); sem motor, arranca-o.
+    if (engineTimer) syncPath(); else startEngine();
   }
 
   document.addEventListener('yt-navigate-finish', route);

@@ -49,6 +49,10 @@ As atualizações chegam automaticamente via Tampermonkey (`@updateURL`).
   obsoletos), sempre com o vídeo a repetir e um aviso na consola.
 - Funciona com a navegação SPA do YouTube (não é preciso recarregar a página).
   Ao sair dos Shorts, larga o elemento `<video>` e destranca o `loop`.
+- **Passar à frente à mão nunca salta dois**: o estado do Short novo é
+  sincronizado logo no evento de navegação, e qualquer sinal do `<video>` que
+  chegue entre a mudança de URL e essa sincronização é tratado como cauda do
+  Short anterior e ignorado.
 
 ## Só corre nos Shorts
 
